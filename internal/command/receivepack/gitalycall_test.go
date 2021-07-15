@@ -6,28 +6,23 @@ import (
 	"testing"
 
 	"github.com/sirupsen/logrus"
-
 	"github.com/stretchr/testify/require"
+	"gitlab.com/gitlab-org/labkit/correlation"
 
 	"gitlab.com/gitlab-org/gitlab-shell/client/testserver"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/command/commandargs"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/command/readwriter"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/config"
+	"gitlab.com/gitlab-org/gitlab-shell/internal/sshenv"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/testhelper"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/testhelper/requesthandlers"
 )
 
 func TestReceivePack(t *testing.T) {
-	gitalyAddress, _, cleanup := testserver.StartGitalyServer(t)
-	defer cleanup()
+	gitalyAddress, _ := testserver.StartGitalyServer(t)
 
 	requests := requesthandlers.BuildAllowedWithGitalyHandlers(t, gitalyAddress)
-	url, cleanup := testserver.StartHttpServer(t, requests)
-	defer cleanup()
-
-	envCleanup, err := testhelper.Setenv("SSH_CONNECTION", "127.0.0.1 0")
-	require.NoError(t, err)
-	defer envCleanup()
+	url := testserver.StartHttpServer(t, requests)
 
 	testCases := []struct {
 		username string
@@ -46,7 +41,12 @@ func TestReceivePack(t *testing.T) {
 		input := &bytes.Buffer{}
 		repo := "group/repo"
 
-		args := &commandargs.Shell{CommandType: commandargs.ReceivePack, SshArgs: []string{"git-receive-pack", repo}}
+		env := sshenv.Env{
+			IsSSHConnection: true,
+			OriginalCommand: "git-receive-pack group/repo",
+			RemoteAddr:      "127.0.0.1",
+		}
+		args := &commandargs.Shell{CommandType: commandargs.ReceivePack, SshArgs: []string{"git-receive-pack", repo}, Env: env}
 
 		if tc.username != "" {
 			args.GitlabUsername = tc.username
@@ -61,8 +61,10 @@ func TestReceivePack(t *testing.T) {
 		}
 
 		hook := testhelper.SetupLogger()
+		ctx := correlation.ContextWithCorrelation(context.Background(), "a-correlation-id")
+		ctx = correlation.ContextWithClientName(ctx, "gitlab-shell-tests")
 
-		err = cmd.Execute(context.Background())
+		err := cmd.Execute(ctx)
 		require.NoError(t, err)
 
 		if tc.username != "" {
@@ -80,6 +82,6 @@ func TestReceivePack(t *testing.T) {
 		require.Contains(t, entries[1].Message, "remote_ip=127.0.0.1")
 		require.Contains(t, entries[1].Message, "gl_key_type=key")
 		require.Contains(t, entries[1].Message, "gl_key_id=123")
-		require.Contains(t, entries[1].Message, "correlation_id=")
+		require.Contains(t, entries[1].Message, "correlation_id=a-correlation-id")
 	}
 }

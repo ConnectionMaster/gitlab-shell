@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	pb "gitlab.com/gitlab-org/gitaly/proto/go/gitalypb"
+	pb "gitlab.com/gitlab-org/gitaly/v14/proto/go/gitalypb"
 	"gitlab.com/gitlab-org/gitlab-shell/client"
 	"gitlab.com/gitlab-org/gitlab-shell/client/testserver"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/command/commandargs"
@@ -53,8 +53,7 @@ func buildExpectedResponse(who string) *Response {
 }
 
 func TestSuccessfulResponses(t *testing.T) {
-	client, cleanup := setup(t, "")
-	defer cleanup()
+	client := setup(t, "")
 
 	testCases := []struct {
 		desc string
@@ -84,8 +83,7 @@ func TestSuccessfulResponses(t *testing.T) {
 }
 
 func TestGeoPushGetCustomAction(t *testing.T) {
-	client, cleanup := setup(t, "responses/allowed_with_push_payload.json")
-	defer cleanup()
+	client := setup(t, "responses/allowed_with_push_payload.json")
 
 	args := &commandargs.Shell{GitlabUsername: "custom"}
 	result, err := client.Verify(context.Background(), args, receivePackAction, repo)
@@ -107,8 +105,7 @@ func TestGeoPushGetCustomAction(t *testing.T) {
 }
 
 func TestGeoPullGetCustomAction(t *testing.T) {
-	client, cleanup := setup(t, "responses/allowed_with_pull_payload.json")
-	defer cleanup()
+	client := setup(t, "responses/allowed_with_pull_payload.json")
 
 	args := &commandargs.Shell{GitlabUsername: "custom"}
 	result, err := client.Verify(context.Background(), args, uploadPackAction, repo)
@@ -130,8 +127,7 @@ func TestGeoPullGetCustomAction(t *testing.T) {
 }
 
 func TestErrorResponses(t *testing.T) {
-	client, cleanup := setup(t, "")
-	defer cleanup()
+	client := setup(t, "")
 
 	testCases := []struct {
 		desc          string
@@ -166,10 +162,8 @@ func TestErrorResponses(t *testing.T) {
 	}
 }
 
-func setup(t *testing.T, allowedPayload string) (*Client, func()) {
-	testDirCleanup, err := testhelper.PrepareTestRootDir()
-	require.NoError(t, err)
-	defer testDirCleanup()
+func setup(t *testing.T, allowedPayload string) *Client {
+	testhelper.PrepareTestRootDir(t)
 
 	body, err := ioutil.ReadFile(path.Join(testhelper.TestRoot, "responses/allowed.json"))
 	require.NoError(t, err)
@@ -227,10 +221,10 @@ func setup(t *testing.T, allowedPayload string) (*Client, func()) {
 		},
 	}
 
-	url, cleanup := testserver.StartSocketHttpServer(t, requests)
+	url := testserver.StartSocketHttpServer(t, requests)
 
 	client, err := NewClient(&config.Config{GitlabUrl: url})
 	require.NoError(t, err)
 
-	return client, cleanup
+	return client
 }

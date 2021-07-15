@@ -3,16 +3,27 @@ package main
 import (
 	"flag"
 	"os"
+	"os/signal"
+	"context"
+	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
+	"gitlab.com/gitlab-org/gitlab-shell/internal/command"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/config"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/logger"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/sshd"
+	"gitlab.com/gitlab-org/labkit/monitoring"
 )
 
 var (
 	configDir = flag.String("config-dir", "", "The directory the config is in")
+
+	// BuildTime signifies the time the binary was build.
+	BuildTime = "2021-02-16T09:28:07+01:00" // Set at build time in the Makefile
+	// Version is the current version of GitLab Shell sshd.
+	Version = "(unknown version)" // Set at build time in the Makefile
 )
 
 func overrideConfigFromEnvironment(cfg *config.Config) {
@@ -42,16 +53,55 @@ func main() {
 		}
 	}
 	overrideConfigFromEnvironment(cfg)
-	cfg.ApplyServerDefaults()
 	if err := cfg.IsSane(); err != nil {
 		if *configDir == "" {
 			log.Warn("note: no config-dir provided, using only environment variables")
 		}
 		log.Fatalf("configuration error: %v", err)
 	}
+
+	cfg.ApplyGlobalState()
+
 	logger.ConfigureStandalone(cfg)
 
-	if err := sshd.Run(cfg); err != nil {
+	ctx, finished := command.Setup("gitlab-sshd", cfg)
+	defer finished()
+
+	server := sshd.Server{Config: cfg}
+
+	// Startup monitoring endpoint.
+	if cfg.Server.WebListen != "" {
+		go func() {
+			log.Fatal(
+				monitoring.Start(
+					monitoring.WithListenerAddress(cfg.Server.WebListen),
+					monitoring.WithBuildInformation(Version, BuildTime),
+				),
+			)
+		}()
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-done
+		signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+
+		log.WithFields(log.Fields{"shutdown_timeout_s": cfg.Server.GracePeriodSeconds, "signal": sig.String()}).Infof("Shutdown initiated")
+
+		server.Shutdown()
+
+		<-time.After(cfg.Server.GracePeriod())
+
+		cancel()
+
+	}()
+
+	if err := server.ListenAndServe(ctx); err != nil {
 		log.Fatalf("Failed to start GitLab built-in sshd: %v", err)
 	}
 }

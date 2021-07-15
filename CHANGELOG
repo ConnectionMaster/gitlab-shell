@@ -1,11 +1,58 @@
+v13.20.0
+
+- Remove bin/authorized_keys !491
+- Add a make install command !490
+- Create PROCESS.md page with Security release process !488
+- Fix the Geo SSH push proxy hanging !487
+- Standardize logging timestamp format !485
+
+v13.19.0
+
+- Don't finish the opentracing span early !466
+- gitlab-sshd: Respect the ssl_cert_dir config !467
+- Stop changing directory to the filesystem root !470
+- Fix opentracing setup for gitlab-sshd !473
+
+v13.18.0
+
+- Fix thread-safety issues in gitlab-shell !463
+- gitlab-sshd: Support the PROXY protocol !461
+- sshd: Recover from per-session and per-connection panics !464
+
+v13.17.0
+
+- Fix gitlab-shell panic when log file not writable !453
+- Add monitoring endpoint to built-in SSH server !449
+
+v13.16.1
+
+- Read limited input when asking to generate new two-factor recovery codes
+
+v13.16.0
+
+- RFC: Simple built-in SSH server !394
+- Remove the session duration information from the output of 2fa_verify command !445
+
+v13.15.1
+
+- Read limited input when asking to generate new two-factor recovery codes
+
 v13.15.0
 
 - Update httpclient.go with TLS 1.2 as minimum version !435
+
+v13.14.1
+
+- Read limited input when asking to generate new two-factor recovery codes
 
 v13.14.0
 
 - Add 2fa_verify command !440
 - Propagate client identity to gitaly !436
+
+v13.13.1
+
+- Read limited input when asking to generate new two-factor recovery codes
 
 v13.13.0
 

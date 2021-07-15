@@ -5,14 +5,14 @@ import (
 
 	"google.golang.org/grpc"
 
-	"gitlab.com/gitlab-org/gitaly/client"
-	pb "gitlab.com/gitlab-org/gitaly/proto/go/gitalypb"
+	"gitlab.com/gitlab-org/gitaly/v14/client"
+	pb "gitlab.com/gitlab-org/gitaly/v14/proto/go/gitalypb"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/command/commandargs"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/gitlabnet/accessverifier"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/handler"
 )
 
-func (c *Command) performGitalyCall(response *accessverifier.Response) error {
+func (c *Command) performGitalyCall(ctx context.Context, response *accessverifier.Response) error {
 	gc := &handler.GitalyCommand{
 		Config:      c.Config,
 		ServiceName: string(commandargs.UploadArchive),
@@ -23,8 +23,8 @@ func (c *Command) performGitalyCall(response *accessverifier.Response) error {
 
 	request := &pb.SSHUploadArchiveRequest{Repository: &response.Gitaly.Repo}
 
-	return gc.RunGitalyCommand(func(ctx context.Context, conn *grpc.ClientConn) (int32, error) {
-		ctx, cancel := gc.PrepareContext(ctx, request.Repository, response, "")
+	return gc.RunGitalyCommand(ctx, func(ctx context.Context, conn *grpc.ClientConn) (int32, error) {
+		ctx, cancel := gc.PrepareContext(ctx, request.Repository, response, c.Args.Env)
 		defer cancel()
 
 		rw := c.ReadWriter

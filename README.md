@@ -7,7 +7,7 @@ GitLab Shell is not a Unix shell nor a replacement for Bash or Zsh.
 
 When you access the GitLab server over SSH then GitLab Shell will:
 
-1. Limits you to predefined git commands (git push, git pull).
+1. Limit you to predefined git commands (git push, git pull).
 1. Call the GitLab Rails API to check if you are authorized, and what Gitaly server your repository is on
 1. Copy data back and forth between the SSH client and the Gitaly server
 
@@ -31,15 +31,38 @@ Ruby to build and test, but not to run.
 
 Download and install the current version of Go from https://golang.org/dl/
 
-## Setup
-
-    make setup
+We follow the [Golang Release Policy](https://golang.org/doc/devel/release.html#policy)
+of supporting the current stable version and the previous two major versions.
 
 ## Check
 
 Checks if GitLab API access and redis via internal API can be reached:
 
     make check
+
+## Compile
+
+Builds the `gitlab-shell` binaries, placing them into `bin/`.
+
+    make compile
+
+## Install
+
+Builds the `gitlab-shell` binaries and installs them onto the filesystem. The
+default location is `/usr/local`, but can be controlled by use of the `PREFIX`
+and `DESTDIR` environment variables.
+
+    make install
+
+## Setup
+
+This command is intended for use when installing GitLab from source on a single
+machine. In addition to compiling the gitlab-shell binaries, it ensures that
+various paths on the filesystem exist with the correct permissions. Do not run
+it unless instructed to by your installation method documentation.
+
+    make setup
+
 
 ## Testing
 
@@ -57,32 +80,27 @@ Run both test and verify (the default Makefile target):
     bundle install
     make validate
 
+### Gitaly
+
+Some tests need a Gitaly server. The
+[`docker-compose.yml`](./docker-compose.yml) file will run Gitaly on
+port 8075. To tell the tests where Gitaly is, set
+`GITALY_CONNECTION_INFO`:
+
+    export GITALY_CONNECTION_INFO='{"address": "tcp://localhost:8075", "storage": "default"}'
+    make test
+
+If no `GITALY_CONNECTION_INFO` is set, the test suite will still run, but any
+tests requiring Gitaly will be skipped. They will always run in the CI
+environment.
+
 ## Git LFS remark
 
 Starting with GitLab 8.12, GitLab supports Git LFS authentication through SSH.
 
-## Releasing a new version
+## Releasing
 
-GitLab Shell is versioned by git tags, and the version used by the Rails
-application is stored in
-[`GITLAB_SHELL_VERSION`](https://gitlab.com/gitlab-org/gitlab/-/blob/master/GITLAB_SHELL_VERSION).
-
-For each version, there is a raw version and a tag version:
-
-- The **raw version** is the version number. For instance, `15.2.8`.
-- The **tag version** is the raw version prefixed with `v`. For instance, `v15.2.8`.
-
-To release a new version of GitLab Shell and have that version available to the
-Rails application:
-
-1. Create a merge request to update the [`CHANGELOG`](CHANGELOG) with the
-   **tag version** and the [`VERSION`](VERSION) file with the **raw version**.
-2. Ask a maintainer to review and merge the merge request. If you're already a
-   maintainer, second maintainer review is not required.
-3. Add a new git tag with the **tag version**.
-4. Update `GITLAB_SHELL_VERSION` in the Rails application to the **raw
-   version**. (Note: this can be done as a separate MR to that, or in and MR
-   that will make use of the latest GitLab Shell changes.)
+See [PROCESS.md](./PROCESS.md)
 
 ## Contributing
 

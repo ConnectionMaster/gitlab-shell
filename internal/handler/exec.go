@@ -3,36 +3,30 @@ package handler
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	log "github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 
-	gitalyauth "gitlab.com/gitlab-org/gitaly/auth"
-	"gitlab.com/gitlab-org/gitaly/client"
-	pb "gitlab.com/gitlab-org/gitaly/proto/go/gitalypb"
+	gitalyauth "gitlab.com/gitlab-org/gitaly/v14/auth"
+	"gitlab.com/gitlab-org/gitaly/v14/client"
+	pb "gitlab.com/gitlab-org/gitaly/v14/proto/go/gitalypb"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/config"
-	"gitlab.com/gitlab-org/gitlab-shell/internal/executable"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/gitlabnet/accessverifier"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/sshenv"
 	"gitlab.com/gitlab-org/labkit/correlation"
 	grpccorrelation "gitlab.com/gitlab-org/labkit/correlation/grpc"
-	"gitlab.com/gitlab-org/labkit/tracing"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
+	grpctracing "gitlab.com/gitlab-org/labkit/tracing/grpc"
 )
 
 // GitalyHandlerFunc implementations are responsible for making
 // an appropriate Gitaly call using the provided client and context
 // and returning an error from the Gitaly call.
 type GitalyHandlerFunc func(ctx context.Context, client *grpc.ClientConn) (int32, error)
-
-type GitalyConn struct {
-	ctx   context.Context
-	conn  *grpc.ClientConn
-	close func()
-}
 
 type GitalyCommand struct {
 	Config      *config.Config
@@ -45,30 +39,24 @@ type GitalyCommand struct {
 // RunGitalyCommand provides a bootstrap for Gitaly commands executed
 // through GitLab-Shell. It ensures that logging, tracing and other
 // common concerns are configured before executing the `handler`.
-func (gc *GitalyCommand) RunGitalyCommand(handler GitalyHandlerFunc) error {
-	gitalyConn, err := getConn(gc)
-
+func (gc *GitalyCommand) RunGitalyCommand(ctx context.Context, handler GitalyHandlerFunc) error {
+	conn, err := getConn(ctx, gc)
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
 
-	_, err = handler(gitalyConn.ctx, gitalyConn.conn)
-
-	gitalyConn.close()
+	childCtx := withOutgoingMetadata(ctx, gc.Features)
+	_, err = handler(childCtx, conn)
 
 	return err
 }
 
 // PrepareContext wraps a given context with a correlation ID and logs the command to
 // be run.
-func (gc *GitalyCommand) PrepareContext(ctx context.Context, repository *pb.Repository, response *accessverifier.Response, protocol string) (context.Context, context.CancelFunc) {
+func (gc *GitalyCommand) PrepareContext(ctx context.Context, repository *pb.Repository, response *accessverifier.Response, env sshenv.Env) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(ctx)
-
-	gc.LogExecution(repository, response, protocol)
-
-	if response.CorrelationID != "" {
-		ctx = correlation.ContextWithCorrelation(ctx, response.CorrelationID)
-	}
+	gc.LogExecution(ctx, repository, response, env)
 
 	md, ok := metadata.FromOutgoingContext(ctx)
 	if !ok {
@@ -78,22 +66,22 @@ func (gc *GitalyCommand) PrepareContext(ctx context.Context, repository *pb.Repo
 	md.Append("key_type", response.KeyType)
 	md.Append("user_id", response.UserId)
 	md.Append("username", response.Username)
-	md.Append("remote_ip", sshenv.LocalAddr())
+	md.Append("remote_ip", env.RemoteAddr)
 	ctx = metadata.NewOutgoingContext(ctx, md)
 
 	return ctx, cancel
 }
 
-func (gc *GitalyCommand) LogExecution(repository *pb.Repository, response *accessverifier.Response, protocol string) {
+func (gc *GitalyCommand) LogExecution(ctx context.Context, repository *pb.Repository, response *accessverifier.Response, env sshenv.Env) {
 	fields := log.Fields{
 		"command":         gc.ServiceName,
-		"correlation_id":  response.CorrelationID,
+		"correlation_id":  correlation.ExtractFromContext(ctx),
 		"gl_project_path": repository.GlProjectPath,
 		"gl_repository":   repository.GlRepository,
 		"user_id":         response.UserId,
 		"username":        response.Username,
-		"git_protocol":    protocol,
-		"remote_ip":       sshenv.LocalAddr(),
+		"git_protocol":    env.GitProtocolVersion,
+		"remote_ip":       env.RemoteAddr,
 		"gl_key_type":     response.KeyType,
 		"gl_key_id":       response.KeyId,
 	}
@@ -113,23 +101,43 @@ func withOutgoingMetadata(ctx context.Context, features map[string]string) conte
 	return metadata.NewOutgoingContext(ctx, md)
 }
 
-func getConn(gc *GitalyCommand) (*GitalyConn, error) {
+func getConn(ctx context.Context, gc *GitalyCommand) (*grpc.ClientConn, error) {
 	if gc.Address == "" {
 		return nil, fmt.Errorf("no gitaly_address given")
 	}
 
+	serviceName := correlation.ExtractClientNameFromContext(ctx)
+	if serviceName == "" {
+		log.Warn("No gRPC service name specified, defaulting to gitlab-shell-unknown")
+
+		serviceName = "gitlab-shell-unknown"
+	}
+
+	serviceName = fmt.Sprintf("%s-%s", serviceName, gc.ServiceName)
+
 	connOpts := client.DefaultDialOpts
-	connOpts = append(connOpts,
+	connOpts = append(
+		connOpts,
 		grpc.WithStreamInterceptor(
-			grpccorrelation.StreamClientCorrelationInterceptor(
-				grpccorrelation.WithClientName(executable.GitlabShell),
+			grpc_middleware.ChainStreamClient(
+				grpctracing.StreamClientTracingInterceptor(),
+				grpc_prometheus.StreamClientInterceptor,
+				grpccorrelation.StreamClientCorrelationInterceptor(
+					grpccorrelation.WithClientName(serviceName),
+				),
 			),
 		),
+
 		grpc.WithUnaryInterceptor(
-			grpccorrelation.UnaryClientCorrelationInterceptor(
-				grpccorrelation.WithClientName(executable.GitlabShell),
+			grpc_middleware.ChainUnaryClient(
+				grpctracing.UnaryClientTracingInterceptor(),
+				grpc_prometheus.UnaryClientInterceptor,
+				grpccorrelation.UnaryClientCorrelationInterceptor(
+					grpccorrelation.WithClientName(serviceName),
+				),
 			),
-		))
+		),
+	)
 
 	if gc.Token != "" {
 		connOpts = append(connOpts,
@@ -137,40 +145,5 @@ func getConn(gc *GitalyCommand) (*GitalyConn, error) {
 		)
 	}
 
-	// Use a working directory that won't get removed or unmounted.
-	if err := os.Chdir("/"); err != nil {
-		return nil, err
-	}
-
-	// Configure distributed tracing
-	serviceName := fmt.Sprintf("gitlab-shell-%v", gc.ServiceName)
-	closer := tracing.Initialize(
-		tracing.WithServiceName(serviceName),
-
-		// For GitLab-Shell, we explicitly initialize tracing from a config file
-		// instead of the default environment variable (using GITLAB_TRACING)
-		// This decision was made owing to the difficulty in passing environment
-		// variables into GitLab-Shell processes.
-		//
-		// Processes are spawned as children of the SSH daemon, which tightly
-		// controls environment variables; doing this means we don't have to
-		// enable PermitUserEnvironment
-		tracing.WithConnectionString(gc.Config.GitlabTracing),
-	)
-
-	ctx, finished := tracing.ExtractFromEnv(context.Background())
-	ctx = withOutgoingMetadata(ctx, gc.Features)
-
-	conn, err := client.Dial(gc.Address, connOpts)
-	if err != nil {
-		return nil, err
-	}
-
-	finish := func() {
-		finished()
-		closer.Close()
-		conn.Close()
-	}
-
-	return &GitalyConn{ctx: ctx, conn: conn, close: finish}, nil
+	return client.DialContext(ctx, gc.Address, connOpts)
 }

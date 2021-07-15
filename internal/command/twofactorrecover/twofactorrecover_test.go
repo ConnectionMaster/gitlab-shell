@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -64,8 +65,7 @@ const (
 func TestExecute(t *testing.T) {
 	setup(t)
 
-	url, cleanup := testserver.StartSocketHttpServer(t, requests)
-	defer cleanup()
+	url := testserver.StartSocketHttpServer(t, requests)
 
 	testCases := []struct {
 		desc           string
@@ -111,6 +111,13 @@ func TestExecute(t *testing.T) {
 			desc:      "With negative answer",
 			arguments: &commandargs.Shell{},
 			answer:    "no\n",
+			expectedOutput: question +
+				"New recovery codes have *not* been generated. Existing codes will remain valid.\n",
+		},
+		{
+			desc:      "With some other answer",
+			arguments: &commandargs.Shell{},
+			answer:    strings.Repeat("yes", 1024),
 			expectedOutput: question +
 				"New recovery codes have *not* been generated. Existing codes will remain valid.\n",
 		},

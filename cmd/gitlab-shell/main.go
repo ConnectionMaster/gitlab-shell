@@ -10,6 +10,7 @@ import (
 	"gitlab.com/gitlab-org/gitlab-shell/internal/console"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/executable"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/logger"
+	"gitlab.com/gitlab-org/gitlab-shell/internal/sshenv"
 )
 
 var (
@@ -47,7 +48,8 @@ func main() {
 
 	logger.Configure(config)
 
-	cmd, err := command.New(executable, os.Args[1:], config, readWriter)
+	env := sshenv.NewFromEnv()
+	cmd, err := command.New(executable, os.Args[1:], env, config, readWriter)
 	if err != nil {
 		// For now this could happen if `SSH_CONNECTION` is not set on
 		// the environment
@@ -55,7 +57,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx, finished := command.ContextWithCorrelationID()
+	ctx, finished := command.Setup(executable.Name, config)
 	defer finished()
 
 	if err = cmd.Execute(ctx); err != nil {

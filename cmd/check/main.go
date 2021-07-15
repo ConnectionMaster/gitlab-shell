@@ -9,6 +9,7 @@ import (
 	"gitlab.com/gitlab-org/gitlab-shell/internal/config"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/executable"
 	"gitlab.com/gitlab-org/gitlab-shell/internal/logger"
+	"gitlab.com/gitlab-org/gitlab-shell/internal/sshenv"
 )
 
 func main() {
@@ -32,13 +33,13 @@ func main() {
 
 	logger.Configure(config)
 
-	cmd, err := command.New(executable, os.Args[1:], config, readWriter)
+	cmd, err := command.New(executable, os.Args[1:], sshenv.Env{}, config, readWriter)
 	if err != nil {
 		fmt.Fprintf(readWriter.ErrOut, "%v\n", err)
 		os.Exit(1)
 	}
 
-	ctx, finished := command.ContextWithCorrelationID()
+	ctx, finished := command.Setup(executable.Name, config)
 	defer finished()
 
 	if err = cmd.Execute(ctx); err != nil {
