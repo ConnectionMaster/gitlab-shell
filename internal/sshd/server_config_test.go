@@ -27,7 +27,7 @@ func TestNewServerConfigWithoutHosts(t *testing.T) {
 	_, err := newServerConfig(&config.Config{GitlabUrl: "http://localhost"})
 
 	require.Error(t, err)
-	require.Equal(t, "No host keys could be loaded, aborting", err.Error())
+	require.Equal(t, "no host keys could be loaded, aborting", err.Error())
 }
 
 func TestHostKeyAndCerts(t *testing.T) {
@@ -73,7 +73,7 @@ func TestFailedAuthorizedKeysClient(t *testing.T) {
 	_, err := newServerConfig(&config.Config{GitlabUrl: "ftp://localhost"})
 
 	require.Error(t, err)
-	require.Equal(t, "failed to initialize authorized keys client: Error creating http client: unknown GitLab URL prefix", err.Error())
+	require.Equal(t, "failed to initialize authorized keys client: error creating http client: unknown GitLab URL prefix", err.Error())
 }
 
 func TestUserKeyHandling(t *testing.T) {
@@ -133,7 +133,7 @@ func TestUserKeyHandling(t *testing.T) {
 			desc:        "API error",
 			user:        "user",
 			key:         rsaPublicKey(t),
-			expectedErr: &client.ApiError{Msg: "Internal API unreachable"},
+			expectedErr: &client.APIError{Msg: "Internal API unreachable"},
 		}, {
 			desc: "successful request",
 			user: "user",
@@ -210,7 +210,7 @@ func TestUserCertificateHandling(t *testing.T) {
 			desc:             "API error",
 			cert:             userCert(t, ssh.UserCert, time.Now().Add(time.Hour)),
 			featureFlagValue: "1",
-			expectedErr:      &client.ApiError{Msg: "Internal API unreachable"},
+			expectedErr:      &client.APIError{Msg: "Internal API unreachable"},
 		}, {
 			desc:             "successful request",
 			cert:             validUserCert,
@@ -266,6 +266,7 @@ func TestDefaultAlgorithms(t *testing.T) {
 		"aes192-ctr",
 		"aes256-ctr",
 	}
+
 	require.Equal(t, sshServerConfig.Ciphers, defaultCiphers)
 }
 
@@ -273,13 +274,15 @@ func TestCustomAlgorithms(t *testing.T) {
 	customMACs := []string{"hmac-sha2-512-etm@openssh.com"}
 	customKexAlgos := []string{"curve25519-sha256"}
 	customCiphers := []string{"aes256-gcm@openssh.com"}
+	customPublicKeyAlgorithms := []string{"rsa-sha2-256"}
 
 	srvCfg := &serverConfig{
 		cfg: &config.Config{
 			Server: config.ServerConfig{
-				MACs:          customMACs,
-				KexAlgorithms: customKexAlgos,
-				Ciphers:       customCiphers,
+				MACs:                customMACs,
+				KexAlgorithms:       customKexAlgos,
+				Ciphers:             customCiphers,
+				PublicKeyAlgorithms: customPublicKeyAlgorithms,
 			},
 		},
 	}
@@ -288,6 +291,7 @@ func TestCustomAlgorithms(t *testing.T) {
 	require.Equal(t, customMACs, sshServerConfig.MACs)
 	require.Equal(t, customKexAlgos, sshServerConfig.KeyExchanges)
 	require.Equal(t, customCiphers, sshServerConfig.Ciphers)
+	require.Equal(t, customPublicKeyAlgorithms, sshServerConfig.PublicKeyAuthAlgorithms)
 
 	sshServerConfig.SetDefaults()
 
@@ -313,14 +317,14 @@ func TestGSSAPIWithMIC(t *testing.T) {
 	require.NotNil(t, sshServerConfig.GSSAPIWithMICConfig)
 	require.NotNil(t, sshServerConfig.GSSAPIWithMICConfig.AllowLogin)
 	require.NotNil(t, server)
-	require.Equal(t, server.ServicePrincipalName, "host/test@TEST.TEST")
+	require.Equal(t, "host/test@TEST.TEST", server.ServicePrincipalName)
 
 	sshServerConfig.SetDefaults()
 
 	require.NotNil(t, sshServerConfig.GSSAPIWithMICConfig)
 	require.NotNil(t, sshServerConfig.GSSAPIWithMICConfig.AllowLogin)
 	require.NotNil(t, server)
-	require.Equal(t, server.ServicePrincipalName, "host/test@TEST.TEST")
+	require.Equal(t, "host/test@TEST.TEST", server.ServicePrincipalName)
 }
 
 func TestGSSAPIWithMICDisabled(t *testing.T) {

@@ -19,6 +19,7 @@ import (
 var (
 	capabilities = []string{
 		"version=1",
+		"locking",
 	}
 )
 
@@ -51,9 +52,11 @@ func (c *Command) Execute(ctx context.Context) (context.Context, error) {
 	ctxWithLogData := context.WithValue(ctx, "logData", command.NewLogData(
 		accessResponse.Gitaly.Repo.GlProjectPath,
 		accessResponse.Username,
+		accessResponse.ProjectID,
+		accessResponse.RootNamespaceID,
 	))
 
-	auth, err := c.authenticate(ctx, operation, repo, accessResponse.UserId)
+	auth, err := c.authenticate(ctx, operation, repo, accessResponse.UserID)
 	if err != nil {
 		return ctxWithLogData, err
 	}
@@ -110,13 +113,13 @@ func (c *Command) verifyAccess(ctx context.Context, action commandargs.CommandTy
 	return cmd.Verify(ctx, action, repo)
 }
 
-func (c *Command) authenticate(ctx context.Context, operation string, repo string, userId string) (*GitlabAuthentication, error) {
+func (c *Command) authenticate(ctx context.Context, operation string, repo string, userID string) (*GitlabAuthentication, error) {
 	client, err := lfsauthenticate.NewClient(c.Config, c.Args)
 	if err != nil {
 		return nil, err
 	}
 
-	response, err := client.Authenticate(ctx, operation, repo, userId)
+	response, err := client.Authenticate(ctx, operation, repo, userID)
 	if err != nil {
 		return nil, err
 	}

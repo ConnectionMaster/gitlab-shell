@@ -47,6 +47,7 @@ type ServerConfig struct {
 	HostCertFiles           []string     `yaml:"host_cert_files,omitempty"`
 	MACs                    []string     `yaml:"macs"`
 	KexAlgorithms           []string     `yaml:"kex_algorithms"`
+	PublicKeyAlgorithms     []string     `yaml:"public_key_algorithms"`
 	Ciphers                 []string     `yaml:"ciphers"`
 	GSSAPI                  GSSAPIConfig `yaml:"gssapi,omitempty"`
 }
@@ -60,8 +61,12 @@ type HttpSettingsConfig struct {
 }
 
 type LFSConfig struct {
-	// FIXME: Let's not allow this to be set in config.yml
-	PureSSHProtocol bool // `yaml:"pure_ssh_protocol"`
+	PureSSHProtocol bool `yaml:"pure_ssh_protocol"`
+}
+
+type PATConfig struct {
+	Enabled       bool     `yaml:"enabled,omitempty"`
+	AllowedScopes []string `yaml:"allowed_scopes,omitempty"`
 }
 
 type Config struct {
@@ -80,8 +85,9 @@ type Config struct {
 	HttpSettings   HttpSettingsConfig `yaml:"http_settings"`
 	Server         ServerConfig       `yaml:"sshd"`
 	LFSConfig      LFSConfig          `yaml:"lfs"`
+	PATConfig      PATConfig          `yaml:"pat"`
 
-	httpClient     *client.HttpClient
+	httpClient     *client.HTTPClient
 	httpClientErr  error
 	httpClientOnce sync.Once
 
@@ -96,6 +102,7 @@ var (
 		LogLevel:  "info",
 		Server:    DefaultServerConfig,
 		User:      "git",
+		PATConfig: DefaultPATConfig,
 	}
 
 	DefaultServerConfig = ServerConfig{
@@ -113,6 +120,10 @@ var (
 			"/run/secrets/ssh-hostkeys/ssh_host_ecdsa_key",
 			"/run/secrets/ssh-hostkeys/ssh_host_ed25519_key",
 		},
+	}
+
+	DefaultPATConfig = PATConfig{
+		Enabled: true,
 	}
 )
 
@@ -133,7 +144,7 @@ func (c *Config) ApplyGlobalState() {
 	}
 }
 
-func (c *Config) HttpClient() (*client.HttpClient, error) {
+func (c *Config) HTTPClient() (*client.HTTPClient, error) {
 	c.httpClientOnce.Do(func() {
 		client, err := client.NewHTTPClientWithOpts(
 			c.GitlabUrl,

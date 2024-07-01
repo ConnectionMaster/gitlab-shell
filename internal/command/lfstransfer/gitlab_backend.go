@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"time"
 
 	"github.com/charmbracelet/git-lfs-transfer/transfer"
 	"gitlab.com/gitlab-org/gitlab-shell/v14/internal/command/commandargs"
@@ -101,10 +103,6 @@ func (b *GitlabBackend) issueBatchArgs(op string, oid string, href string, heade
 }
 
 func (b *GitlabBackend) Batch(op string, pointers []transfer.BatchItem, args transfer.Args) ([]transfer.BatchItem, error) {
-	if op != "download" {
-		return nil, newErrUnsupported("upload batch")
-	}
-
 	reqObjects := make([]*lfstransfer.BatchObject, 0)
 
 	for _, pointer := range pointers {
@@ -155,77 +153,261 @@ func (b *GitlabBackend) Batch(op string, pointers []transfer.BatchItem, args tra
 	return items, nil
 }
 
+func (b *GitlabBackend) parseAndCheckBatchArgs(op, oid, id, token string) (href string, headers map[string]string, err error) {
+	if id == "" {
+		return "", nil, &errCustom{
+			err:     transfer.ErrParseError,
+			message: "missing id",
+		}
+	}
+	if token == "" {
+		return "", nil, &errCustom{
+			err:     transfer.ErrUnauthorized,
+			message: "missing token",
+		}
+	}
+	idBinary, err := base64.StdEncoding.DecodeString(id)
+	if err != nil {
+		return "", nil, &errCustom{
+			err:     transfer.ErrParseError,
+			message: "invalid id",
+		}
+	}
+	tokenBinary, err := base64.StdEncoding.DecodeString(token)
+	if err != nil {
+		return "", nil, &errCustom{
+			err:     transfer.ErrParseError,
+			message: "invalid token",
+		}
+	}
+	h := hmac.New(sha256.New, []byte(b.config.Secret))
+	h.Write(idBinary)
+	if !hmac.Equal(tokenBinary, h.Sum(nil)) {
+		return "", nil, &errCustom{
+			err:     transfer.ErrForbidden,
+			message: "token hash mismatch",
+		}
+	}
+
+	idData := &idData{}
+	err = json.Unmarshal(idBinary, idData)
+	if err != nil {
+		return "", nil, &errCustom{
+			err:     transfer.ErrParseError,
+			message: "invalid id",
+		}
+	}
+	if idData.Operation != op {
+		return "", nil, &errCustom{
+			err:     transfer.ErrForbidden,
+			message: "invalid operation",
+		}
+	}
+	if idData.Oid != oid {
+		return "", nil, &errCustom{
+			err:     transfer.ErrForbidden,
+			message: "invalid oid",
+		}
+	}
+
+	return idData.Href, idData.Headers, nil
+}
+
+type uploadCloser struct{}
+
+func (c *uploadCloser) Close() error {
+	return nil
+}
+
 func (b *GitlabBackend) StartUpload(oid string, r io.Reader, args transfer.Args) (io.Closer, error) {
-	io.Copy(io.Discard, r)
-	return nil, newErrUnsupported("put-object")
+	href, headers, err := b.parseAndCheckBatchArgs("upload", oid, args["id"], args["token"])
+	if err != nil {
+		_, _ = io.Copy(io.Discard, r)
+		return nil, err
+	}
+	return &uploadCloser{}, b.client.PutObject(oid, href, headers, r)
 }
 
-func (b *GitlabBackend) FinishUpload(state io.Closer, args transfer.Args) error {
-	return newErrUnsupported("put-object")
+func (b *GitlabBackend) FinishUpload(_ io.Closer, _ transfer.Args) error {
+	return nil
 }
 
-func (b *GitlabBackend) Verify(oid string, args transfer.Args) (transfer.Status, error) {
-	return nil, newErrUnsupported("verify-object")
+func (b *GitlabBackend) Verify(_ string, _ transfer.Args) (transfer.Status, error) {
+	// Not needed, all verification is done in upload step.
+	return transfer.SuccessStatus(), nil
 }
 
 func (b *GitlabBackend) Download(oid string, args transfer.Args) (fs.File, error) {
-	return nil, newErrUnsupported("get-object")
+	href, headers, err := b.parseAndCheckBatchArgs("download", oid, args["id"], args["token"])
+	if err != nil {
+		return nil, err
+	}
+	return b.client.GetObject(oid, href, headers)
 }
 
 func (b *GitlabBackend) LockBackend(args transfer.Args) transfer.LockBackend {
-	return &gitlabLockBackend{}
+	return &gitlabLockBackend{
+		auth:   b.auth,
+		client: b.client,
+		args:   args,
+	}
 }
 
 type gitlabLock struct {
 	*gitlabLockBackend
+	id        string
+	path      string
+	timestamp time.Time
+	owner     string
+	ownerid   string
 }
 
 func (l *gitlabLock) Unlock() error {
-	return newErrUnsupported("unlock")
-}
-
-func (l *gitlabLock) AsArguments() []string {
+	lock, err := l.gitlabLockBackend.client.Unlock(l.id, l.gitlabLockBackend.args["force"] == "true", l.gitlabLockBackend.args["refname"])
+	if err != nil {
+		return err
+	}
+	l.id = lock.ID
+	l.path = lock.Path
+	l.timestamp = lock.LockedAt
+	if lock.Owner != nil {
+		l.owner = lock.Owner.Name
+	}
 	return nil
 }
 
+func (l *gitlabLock) AsArguments() []string {
+	return []string{
+		fmt.Sprintf("id=%s", l.id),
+		fmt.Sprintf("path=%s", l.path),
+		fmt.Sprintf("locked-at=%s", l.timestamp.Format(time.RFC3339)),
+		fmt.Sprintf("ownername=%s", l.owner),
+	}
+}
+
 func (l *gitlabLock) AsLockSpec(useOwnerID bool) ([]string, error) {
-	return nil, nil
+	spec := []string{
+		fmt.Sprintf("lock %s", l.id),
+		fmt.Sprintf("path %s %s", l.id, l.path),
+		fmt.Sprintf("locked-at %s %s", l.id, l.timestamp.Format(time.RFC3339)),
+		fmt.Sprintf("ownername %s %s", l.id, l.owner),
+	}
+	if useOwnerID {
+		spec = append(spec, fmt.Sprintf("owner %s %s", l.id, l.ownerid))
+	}
+	return spec, nil
 }
 
 func (l *gitlabLock) FormattedTimestamp() string {
-	return ""
+	return l.timestamp.Format("")
 }
 
 func (l *gitlabLock) ID() string {
-	return ""
+	return l.id
 }
 
 func (l *gitlabLock) OwnerName() string {
-	return ""
+	return l.owner
 }
 
 func (l *gitlabLock) Path() string {
-	return ""
+	return l.path
 }
 
-type gitlabLockBackend struct{}
+type gitlabLockBackend struct {
+	auth   *GitlabAuthentication
+	client *lfstransfer.Client
+	args   map[string]string
+}
 
 func (b *gitlabLockBackend) Create(path string, refname string) (transfer.Lock, error) {
-	return nil, newErrUnsupported("lock")
+	l, err := b.client.Lock(path, refname)
+	var lock *gitlabLock
+	if l != nil {
+		lock = &gitlabLock{
+			gitlabLockBackend: b,
+			id:                l.ID,
+			path:              l.Path,
+			timestamp:         l.LockedAt,
+			owner:             l.Owner.Name,
+		}
+	}
+	return lock, err
 }
 
-func (b *gitlabLockBackend) Unlock(lock transfer.Lock) error {
+func (b *gitlabLockBackend) Unlock(_ transfer.Lock) error {
 	return newErrUnsupported("unlock")
 }
 
 func (b *gitlabLockBackend) FromPath(path string) (transfer.Lock, error) {
-	return &gitlabLock{gitlabLockBackend: b}, nil
+	res, err := b.client.ListLocksVerify(path, "", "", 1, "")
+	if err != nil {
+		return nil, err
+	}
+	var lock *lfstransfer.Lock
+	var owner string
+	switch {
+	case len(res.Ours) == 1 && len(res.Theirs) == 0:
+		lock = res.Ours[0]
+		owner = "ours"
+	case len(res.Ours) == 0 && len(res.Theirs) == 1:
+		lock = res.Theirs[0]
+		owner = "theirs"
+	case len(res.Ours) == 0 && len(res.Theirs) == 0:
+		return nil, nil
+	default:
+		return nil, errors.New("internal error")
+	}
+	return &gitlabLock{
+		gitlabLockBackend: b,
+		id:                lock.ID,
+		path:              lock.Path,
+		timestamp:         lock.LockedAt,
+		owner:             lock.Owner.Name,
+		ownerid:           owner,
+	}, nil
 }
 
 func (b *gitlabLockBackend) FromID(id string) (transfer.Lock, error) {
-	return &gitlabLock{gitlabLockBackend: b}, nil
+	return &gitlabLock{
+		gitlabLockBackend: b,
+		id:                id,
+	}, nil
 }
 
 func (b *gitlabLockBackend) Range(cursor string, limit int, iter func(transfer.Lock) error) (string, error) {
-	return "", newErrUnsupported("list-lock")
+	res, err := b.client.ListLocksVerify(b.args["path"], b.args["id"], cursor, limit, b.args["refname"])
+	if err != nil {
+		return "", err
+	}
+	for _, lock := range res.Ours {
+		tlock := &gitlabLock{
+			gitlabLockBackend: b,
+			id:                lock.ID,
+			path:              lock.Path,
+			timestamp:         lock.LockedAt,
+			owner:             lock.Owner.Name,
+			ownerid:           "ours",
+		}
+		err = iter(tlock)
+		if err != nil {
+			return "", err
+		}
+	}
+	for _, lock := range res.Theirs {
+		tlock := &gitlabLock{
+			gitlabLockBackend: b,
+			id:                lock.ID,
+			path:              lock.Path,
+			timestamp:         lock.LockedAt,
+			owner:             lock.Owner.Name,
+			ownerid:           "theirs",
+		}
+		err = iter(tlock)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return res.NextCursor, nil
 }

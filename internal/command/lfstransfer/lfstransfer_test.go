@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/git-lfs/pktline"
 	"github.com/stretchr/testify/require"
@@ -94,7 +96,7 @@ func readCapabilities(t *testing.T, pl *pktline.Pktline) {
 	var caps []string
 	end := false
 	for !end {
-		cap, l, err := pl.ReadPacketTextWithLength()
+		capability, l, err := pl.ReadPacketTextWithLength()
 		require.NoError(t, err)
 		switch l {
 		case 0:
@@ -102,11 +104,12 @@ func readCapabilities(t *testing.T, pl *pktline.Pktline) {
 		case 1:
 			require.Fail(t, "Expected text or flush packet, got delim packet")
 		default:
-			caps = append(caps, cap)
+			caps = append(caps, capability)
 		}
 	}
 	require.Equal(t, []string{
 		"version=1",
+		"locking",
 	}, caps)
 }
 
@@ -292,7 +295,7 @@ func TestLfsTransferBatchDownload(t *testing.T) {
 	require.Equal(t, "00000000 0 noop", data[0])
 
 	largeFileArgs := strings.Split(data[1], " ")
-	require.Equal(t, 5, len(largeFileArgs))
+	require.Len(t, largeFileArgs, 5)
 	require.Equal(t, largeFileOid, largeFileArgs[0])
 	require.Equal(t, fmt.Sprint(largeFileLen), largeFileArgs[1])
 	require.Equal(t, "download", largeFileArgs[2])
@@ -343,35 +346,230 @@ func TestLfsTransferBatchDownload(t *testing.T) {
 }
 
 func TestLfsTransferBatchUpload(t *testing.T) {
-	_, cmd, pl, _ := setup(t, "rw", "group/repo", "upload")
+	url, cmd, pl, _ := setup(t, "rw", "group/repo", "upload")
 	wg := setupWaitGroupForExecute(t, cmd)
 	negotiateVersion(t, pl)
 
 	writeCommandArgsAndTextData(t, pl, "batch", nil, []string{
 		"00000000 0",
+		fmt.Sprintf("%s %d", largeFileOid, largeFileLen),
+		fmt.Sprintf("%s %d", evenLargerFileOid, evenLargerFileLen),
 	})
 	status, args, data := readStatusArgsAndTextData(t, pl)
-	require.Equal(t, "status 405", status)
+	require.Equal(t, "status 200", status)
 	require.Empty(t, args)
-	require.Equal(t, []string{
-		"error: upload batch is not yet supported by git-lfs-transfer. See https://gitlab.com/groups/gitlab-org/-/epics/11872 to track progress.",
-	}, data)
+	require.Equal(t, "00000000 0 noop", data[0])
+
+	require.Equal(t, fmt.Sprintf("%s %d noop", largeFileOid, largeFileLen), data[1])
+
+	evenLargerFileArgs := strings.Split(data[2], " ")
+	require.Len(t, evenLargerFileArgs, 5)
+	require.Equal(t, evenLargerFileOid, evenLargerFileArgs[0])
+	require.Equal(t, fmt.Sprint(evenLargerFileLen), evenLargerFileArgs[1])
+	require.Equal(t, "upload", evenLargerFileArgs[2])
+
+	var idArg string
+	var tokenArg string
+	for _, arg := range evenLargerFileArgs[3:] {
+		switch {
+		case strings.HasPrefix(arg, "id="):
+			idArg = arg
+		case strings.HasPrefix(arg, "token="):
+			tokenArg = arg
+		default:
+			require.Fail(t, "Unexpected batch item argument: %v", arg)
+		}
+	}
+
+	idBase64, found := strings.CutPrefix(idArg, "id=")
+	require.True(t, found)
+	idBinary, err := base64.StdEncoding.DecodeString(idBase64)
+	require.NoError(t, err)
+	var id map[string]interface{}
+	require.NoError(t, json.Unmarshal(idBinary, &id))
+	require.Equal(t, map[string]interface{}{
+		"operation": "upload",
+		"oid":       evenLargerFileOid,
+		"href":      fmt.Sprintf("%s/group/repo/gitlab-lfs/objects/%s/%d", url, evenLargerFileOid, evenLargerFileLen),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}, id)
+
+	h := hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBase64, found := strings.CutPrefix(tokenArg, "token=")
+	require.True(t, found)
+	tokenBinary, err := base64.StdEncoding.DecodeString(tokenBase64)
+	require.NoError(t, err)
+	require.Equal(t, h.Sum(nil), tokenBinary)
 
 	quit(t, pl)
 	wg.Wait()
 }
 
 func TestLfsTransferGetObject(t *testing.T) {
-	_, cmd, pl, _ := setup(t, "rw", "group/repo", "download")
+	url, cmd, pl, _ := setup(t, "rw", "group/repo", "download")
 	wg := setupWaitGroupForExecute(t, cmd)
 	negotiateVersion(t, pl)
 
 	writeCommand(t, pl, "get-object 00000000")
 	status, args, data := readStatusArgsAndTextData(t, pl)
-	require.Equal(t, "status 405", status)
+	require.Equal(t, "status 400", status)
 	require.Empty(t, args)
 	require.Equal(t, []string{
-		"error: get-object is not yet supported by git-lfs-transfer. See https://gitlab.com/groups/gitlab-org/-/epics/11872 to track progress.",
+		"error: missing id",
+	}, data)
+
+	writeCommandArgs(t, pl, "get-object 00000000", []string{"id=ggg"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 401", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: missing token",
+	}, data)
+
+	writeCommandArgs(t, pl, "get-object 00000000", []string{"id=ggg", "token=ggg"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 400", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: invalid id",
+	}, data)
+
+	id := base64.StdEncoding.EncodeToString([]byte("{}"))
+	writeCommandArgs(t, pl, "get-object 00000000", []string{fmt.Sprintf("id=%s", id), "token=ggg"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 400", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: invalid token",
+	}, data)
+
+	id = base64.StdEncoding.EncodeToString([]byte("{}"))
+	token := base64.StdEncoding.EncodeToString([]byte("aaa"))
+	writeCommandArgs(t, pl, "get-object 00000000", []string{fmt.Sprintf("id=%s", id), fmt.Sprintf("token=%s", token)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: token hash mismatch",
+	}, data)
+
+	idJSON := map[string]interface{}{
+		"operation": "download",
+		"oid":       largeFileOid,
+		"href":      fmt.Sprintf("%s/group/repo/gitlab-lfs/objects/%s", url, largeFileOid),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ := json.Marshal(idJSON)
+	idBase64 := base64.StdEncoding.EncodeToString(idBinary)
+	h := hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBinary := h.Sum(nil)
+	tokenBase64 := base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgs(t, pl, fmt.Sprintf("get-object %s", largeFileOid), []string{fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)})
+	status, args, binData := readStatusArgsAndBinaryData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Equal(t, []string{
+		fmt.Sprintf("size=%d", largeFileLen),
+	}, args)
+	require.Equal(t, [][]byte{[]byte(largeFileContents)}, binData)
+
+	idJSON = map[string]interface{}{
+		"operation": "download",
+		"oid":       evenLargerFileOid,
+		"href":      fmt.Sprintf("%s/group/repo/gitlab-lfs/objects/%s", url, evenLargerFileOid),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ = json.Marshal(idJSON)
+	idBase64 = base64.StdEncoding.EncodeToString(idBinary)
+	h = hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBinary = h.Sum(nil)
+	tokenBase64 = base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgs(t, pl, fmt.Sprintf("get-object %s", evenLargerFileOid), []string{fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 404", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		fmt.Sprintf("object %s not found", evenLargerFileOid),
+	}, data)
+
+	idJSON = map[string]interface{}{
+		"operation": "upload",
+		"oid":       largeFileOid,
+		"href":      fmt.Sprintf("%s/group/repo/gitlab-lfs/objects/%s", url, largeFileOid),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ = json.Marshal(idJSON)
+	idBase64 = base64.StdEncoding.EncodeToString(idBinary)
+	h = hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBinary = h.Sum(nil)
+	tokenBase64 = base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgs(t, pl, fmt.Sprintf("get-object %s", largeFileOid), []string{fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: invalid operation",
+	}, data)
+
+	idJSON = map[string]interface{}{
+		"operation": "download",
+		"oid":       evenLargerFileOid,
+		"href":      fmt.Sprintf("%s/group/repo/gitlab-lfs/objects/%s", url, largeFileOid),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ = json.Marshal(idJSON)
+	idBase64 = base64.StdEncoding.EncodeToString(idBinary)
+	h = hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBinary = h.Sum(nil)
+	tokenBase64 = base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgs(t, pl, fmt.Sprintf("get-object %s", largeFileOid), []string{fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: invalid oid",
+	}, data)
+
+	idJSON = map[string]interface{}{
+		"operation": "download",
+		"oid":       largeFileOid,
+		"href":      fmt.Sprintf("%s/evil-url", url),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ = json.Marshal(idJSON)
+	idBase64 = base64.StdEncoding.EncodeToString(idBinary)
+	h = hmac.New(sha256.New, []byte("evil secret"))
+	h.Write(idBinary)
+	tokenBinary = h.Sum(nil)
+	tokenBase64 = base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgs(t, pl, fmt.Sprintf("get-object %s", largeFileOid), []string{fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: token hash mismatch",
 	}, data)
 
 	quit(t, pl)
@@ -379,16 +577,162 @@ func TestLfsTransferGetObject(t *testing.T) {
 }
 
 func TestLfsTransferPutObject(t *testing.T) {
-	_, cmd, pl, _ := setup(t, "rw", "group/repo", "upload")
+	url, cmd, pl, _ := setup(t, "rw", "group/repo", "upload")
 	wg := setupWaitGroupForExecute(t, cmd)
 	negotiateVersion(t, pl)
 
 	writeCommandArgsAndBinaryData(t, pl, "put-object 00000000", []string{"size=0"}, nil)
 	status, args, data := readStatusArgsAndTextData(t, pl)
-	require.Equal(t, "status 405", status)
+	require.Equal(t, "status 400", status)
 	require.Empty(t, args)
 	require.Equal(t, []string{
-		"error: put-object is not yet supported by git-lfs-transfer. See https://gitlab.com/groups/gitlab-org/-/epics/11872 to track progress.",
+		"error: missing id",
+	}, data)
+
+	writeCommandArgsAndBinaryData(t, pl, "put-object 00000000", []string{"size=0", "id=ggg"}, nil)
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 401", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: missing token",
+	}, data)
+
+	writeCommandArgsAndBinaryData(t, pl, "put-object 00000000", []string{"size=0", "id=ggg", "token=ggg"}, nil)
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 400", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: invalid id",
+	}, data)
+
+	id := base64.StdEncoding.EncodeToString([]byte("{}"))
+	writeCommandArgsAndBinaryData(t, pl, "put-object 00000000", []string{"size=0", fmt.Sprintf("id=%s", id), "token=ggg"}, nil)
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 400", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: invalid token",
+	}, data)
+
+	id = base64.StdEncoding.EncodeToString([]byte("{}"))
+	token := base64.StdEncoding.EncodeToString([]byte("aaa"))
+	writeCommandArgsAndBinaryData(t, pl, "put-object 00000000", []string{"size=0", fmt.Sprintf("id=%s", id), fmt.Sprintf("token=%s", token)}, nil)
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: token hash mismatch",
+	}, data)
+
+	idJSON := map[string]interface{}{
+		"operation": "upload",
+		"oid":       largeFileOid,
+		"href":      fmt.Sprintf("%s/group/noexist/gitlab-lfs/objects/%s/%d", url, largeFileOid, largeFileLen),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ := json.Marshal(idJSON)
+	idBase64 := base64.StdEncoding.EncodeToString(idBinary)
+	h := hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBinary := h.Sum(nil)
+	tokenBase64 := base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgsAndBinaryData(t, pl, fmt.Sprintf("put-object %s", largeFileOid), []string{fmt.Sprintf("size=%d", largeFileLen), fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)}, [][]byte{[]byte(largeFileContents)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 404", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: not found",
+	}, data)
+
+	idJSON = map[string]interface{}{
+		"operation": "upload",
+		"oid":       evenLargerFileOid,
+		"href":      fmt.Sprintf("%s/group/repo/gitlab-lfs/objects/%s/%d", url, evenLargerFileOid, evenLargerFileLen),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ = json.Marshal(idJSON)
+	idBase64 = base64.StdEncoding.EncodeToString(idBinary)
+	h = hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBinary = h.Sum(nil)
+	tokenBase64 = base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgsAndBinaryData(t, pl, fmt.Sprintf("put-object %s", evenLargerFileOid), []string{fmt.Sprintf("size=%d", evenLargerFileLen), fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)}, [][]byte{[]byte(evenLargerFileContents)})
+	status = readStatus(t, pl)
+	require.Equal(t, "status 200", status)
+
+	idJSON = map[string]interface{}{
+		"operation": "download",
+		"oid":       evenLargerFileOid,
+		"href":      fmt.Sprintf("%s/group/repo/gitlab-lfs/objects/%s/%d", url, evenLargerFileOid, evenLargerFileLen),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ = json.Marshal(idJSON)
+	idBase64 = base64.StdEncoding.EncodeToString(idBinary)
+	h = hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBinary = h.Sum(nil)
+	tokenBase64 = base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgsAndBinaryData(t, pl, fmt.Sprintf("put-object %s", evenLargerFileOid), []string{fmt.Sprintf("size=%d", evenLargerFileLen), fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)}, [][]byte{[]byte(evenLargerFileContents)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: invalid operation",
+	}, data)
+
+	idJSON = map[string]interface{}{
+		"operation": "upload",
+		"oid":       largeFileOid,
+		"href":      fmt.Sprintf("%s/group/repo/gitlab-lfs/objects/%s/%d", url, evenLargerFileOid, evenLargerFileLen),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ = json.Marshal(idJSON)
+	idBase64 = base64.StdEncoding.EncodeToString(idBinary)
+	h = hmac.New(sha256.New, []byte("very secret"))
+	h.Write(idBinary)
+	tokenBinary = h.Sum(nil)
+	tokenBase64 = base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgsAndBinaryData(t, pl, fmt.Sprintf("put-object %s", evenLargerFileOid), []string{fmt.Sprintf("size=%d", evenLargerFileLen), fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)}, [][]byte{[]byte(evenLargerFileContents)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: invalid oid",
+	}, data)
+
+	idJSON = map[string]interface{}{
+		"operation": "upload",
+		"oid":       largeFileOid,
+		"href":      fmt.Sprintf("%s/evil-url", url),
+		"headers": map[string]interface{}{
+			"Authorization": "Basic 1234567890",
+			"Content-Type":  "application/octet-stream",
+		},
+	}
+	idBinary, _ = json.Marshal(idJSON)
+	idBase64 = base64.StdEncoding.EncodeToString(idBinary)
+	h = hmac.New(sha256.New, []byte("evil secret"))
+	h.Write(idBinary)
+	tokenBinary = h.Sum(nil)
+	tokenBase64 = base64.StdEncoding.EncodeToString(tokenBinary)
+	writeCommandArgsAndBinaryData(t, pl, fmt.Sprintf("put-object %s", evenLargerFileOid), []string{fmt.Sprintf("size=%d", evenLargerFileLen), fmt.Sprintf("id=%s", idBase64), fmt.Sprintf("token=%s", tokenBase64)}, [][]byte{[]byte(evenLargerFileContents)})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: token hash mismatch",
 	}, data)
 
 	quit(t, pl)
@@ -401,12 +745,8 @@ func TestLfsTransferVerifyObject(t *testing.T) {
 	negotiateVersion(t, pl)
 
 	writeCommandArgs(t, pl, "verify-object 00000000", []string{"size=0"})
-	status, args, data := readStatusArgsAndTextData(t, pl)
-	require.Equal(t, "status 405", status)
-	require.Empty(t, args)
-	require.Equal(t, []string{
-		"error: verify-object is not yet supported by git-lfs-transfer. See https://gitlab.com/groups/gitlab-org/-/epics/11872 to track progress.",
-	}, data)
+	status := readStatus(t, pl)
+	require.Equal(t, "status 200", status)
 
 	quit(t, pl)
 	wg.Wait()
@@ -417,13 +757,54 @@ func TestLfsTransferLock(t *testing.T) {
 	wg := setupWaitGroupForExecute(t, cmd)
 	negotiateVersion(t, pl)
 
-	writeCommandArgs(t, pl, "lock", []string{"path=large/file"})
+	writeCommandArgs(t, pl, "lock", []string{"path=/large/file/1"})
 	status, args, data := readStatusArgsAndTextData(t, pl)
-	require.Equal(t, "status 405", status)
+	require.Equal(t, "status 409", status)
+	require.Equal(t, []string{
+		"id=lock1",
+		"path=/large/file/1",
+		"locked-at=2023-10-03T13:56:20Z",
+		"ownername=johndoe",
+	}, args)
+	require.Equal(t, []string{
+		"conflict",
+	}, data)
+
+	writeCommandArgs(t, pl, "lock", []string{"path=/large/file/2"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 403", status)
 	require.Empty(t, args)
 	require.Equal(t, []string{
-		"error: lock is not yet supported by git-lfs-transfer. See https://gitlab.com/groups/gitlab-org/-/epics/11872 to track progress.",
+		"error: forbidden",
 	}, data)
+
+	writeCommandArgs(t, pl, "lock", []string{"path=/large/file/3"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 500", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"internal error",
+	}, data)
+
+	writeCommandArgs(t, pl, "lock", []string{"path=/large/file/4"})
+	status, args = readStatusArgs(t, pl)
+	require.Equal(t, "status 201", status)
+	require.Equal(t, []string{
+		"id=lock4",
+		"path=/large/file/4",
+		"locked-at=2023-10-03T13:56:20Z",
+		"ownername=johndoe",
+	}, args)
+
+	writeCommandArgs(t, pl, "lock", []string{"path=/large/file/5", "refname=refs/heads/main"})
+	status, args = readStatusArgs(t, pl)
+	require.Equal(t, "status 201", status)
+	require.Equal(t, []string{
+		"id=lock5",
+		"path=/large/file/5",
+		"locked-at=2023-10-03T13:56:20Z",
+		"ownername=johndoe",
+	}, args)
 
 	quit(t, pl)
 	wg.Wait()
@@ -434,36 +815,302 @@ func TestLfsTransferUnlock(t *testing.T) {
 	wg := setupWaitGroupForExecute(t, cmd)
 	negotiateVersion(t, pl)
 
-	writeCommand(t, pl, "unlock lock1")
+	writeCommandArgs(t, pl, "unlock lock1", []string{"refname=refs/heads/main"})
+	status, args := readStatusArgs(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Equal(t, []string{
+		"id=lock1",
+		"path=/large/file/1",
+		"locked-at=2023-10-03T13:56:20Z",
+		"ownername=johndoe",
+	}, args)
+
+	writeCommandArgs(t, pl, "unlock lock2", []string{"force=true"})
+	status, args = readStatusArgs(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Equal(t, []string{
+		"id=lock2",
+		"path=/large/file/2",
+		"locked-at=1955-11-12T22:04:00Z",
+		"ownername=marty",
+	}, args)
+
+	writeCommand(t, pl, "unlock lock3")
 	status, args, data := readStatusArgsAndTextData(t, pl)
-	require.Equal(t, "status 405", status)
+	require.Equal(t, "status 403", status)
 	require.Empty(t, args)
 	require.Equal(t, []string{
-		"error: unlock is not yet supported by git-lfs-transfer. See https://gitlab.com/groups/gitlab-org/-/epics/11872 to track progress.",
+		"error: forbidden",
+	}, data)
+
+	writeCommand(t, pl, "unlock lock4")
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 404", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"error: not found",
 	}, data)
 
 	quit(t, pl)
 	wg.Wait()
 }
 
-func TestLfsTransferListLock(t *testing.T) {
+func TestLfsTransferListLockDownload(t *testing.T) {
 	_, cmd, pl, _ := setup(t, "rw", "group/repo", "download")
 	wg := setupWaitGroupForExecute(t, cmd)
 	negotiateVersion(t, pl)
 
 	writeCommand(t, pl, "list-lock")
 	status, args, data := readStatusArgsAndTextData(t, pl)
-	require.Equal(t, "status 405", status)
+	require.Equal(t, "status 200", status)
 	require.Empty(t, args)
 	require.Equal(t, []string{
-		"error: list-lock is not yet supported by git-lfs-transfer. See https://gitlab.com/groups/gitlab-org/-/epics/11872 to track progress.",
+		"lock lock1",
+		"path lock1 /large/file/1",
+		"locked-at lock1 2023-10-03T13:56:20Z",
+		"ownername lock1 johndoe",
+
+		"lock lock2",
+		"path lock2 /large/file/2",
+		"locked-at lock2 1955-11-12T22:04:00Z",
+		"ownername lock2 marty",
+
+		"lock lock3",
+		"path lock3 /large/file/3",
+		"locked-at lock3 2023-10-03T13:56:20Z",
+		"ownername lock3 janedoe",
+	}, data)
+
+	writeCommandArgs(t, pl, "list-lock", []string{"limit=2"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Equal(t, []string{
+		"next-cursor=lock3",
+	}, args)
+	require.Equal(t, []string{
+		"lock lock1",
+		"path lock1 /large/file/1",
+		"locked-at lock1 2023-10-03T13:56:20Z",
+		"ownername lock1 johndoe",
+
+		"lock lock2",
+		"path lock2 /large/file/2",
+		"locked-at lock2 1955-11-12T22:04:00Z",
+		"ownername lock2 marty",
+	}, data)
+
+	writeCommandArgs(t, pl, "list-lock", []string{"cursor=lock2"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"lock lock2",
+		"path lock2 /large/file/2",
+		"locked-at lock2 1955-11-12T22:04:00Z",
+		"ownername lock2 marty",
+
+		"lock lock3",
+		"path lock3 /large/file/3",
+		"locked-at lock3 2023-10-03T13:56:20Z",
+		"ownername lock3 janedoe",
+	}, data)
+
+	writeCommandArgs(t, pl, "list-lock", []string{"id=lock1"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"lock lock1",
+		"path lock1 /large/file/1",
+		"locked-at lock1 2023-10-03T13:56:20Z",
+		"ownername lock1 johndoe",
+	}, data)
+
+	writeCommandArgs(t, pl, "list-lock", []string{"path=/large/file/2"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"lock lock2",
+		"path lock2 /large/file/2",
+		"locked-at lock2 1955-11-12T22:04:00Z",
+		"ownername lock2 marty",
 	}, data)
 
 	quit(t, pl)
 	wg.Wait()
 }
 
-func setup(t *testing.T, keyId string, repo string, op string) (string, *Command, *pktline.Pktline, *io.PipeReader) {
+func TestLfsTransferListLockUpload(t *testing.T) {
+	_, cmd, pl, _ := setup(t, "rw", "group/repo", "upload")
+	wg := setupWaitGroupForExecute(t, cmd)
+	negotiateVersion(t, pl)
+
+	writeCommand(t, pl, "list-lock")
+	status, args, data := readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"lock lock1",
+		"path lock1 /large/file/1",
+		"locked-at lock1 2023-10-03T13:56:20Z",
+		"ownername lock1 johndoe",
+		"owner lock1 ours",
+
+		"lock lock2",
+		"path lock2 /large/file/2",
+		"locked-at lock2 1955-11-12T22:04:00Z",
+		"ownername lock2 marty",
+		"owner lock2 theirs",
+
+		"lock lock3",
+		"path lock3 /large/file/3",
+		"locked-at lock3 2023-10-03T13:56:20Z",
+		"ownername lock3 janedoe",
+		"owner lock3 theirs",
+	}, data)
+
+	writeCommandArgs(t, pl, "list-lock", []string{"limit=2"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Equal(t, []string{
+		"next-cursor=lock3",
+	}, args)
+	require.Equal(t, []string{
+		"lock lock1",
+		"path lock1 /large/file/1",
+		"locked-at lock1 2023-10-03T13:56:20Z",
+		"ownername lock1 johndoe",
+		"owner lock1 ours",
+
+		"lock lock2",
+		"path lock2 /large/file/2",
+		"locked-at lock2 1955-11-12T22:04:00Z",
+		"ownername lock2 marty",
+		"owner lock2 theirs",
+	}, data)
+
+	writeCommandArgs(t, pl, "list-lock", []string{"cursor=lock2"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"lock lock2",
+		"path lock2 /large/file/2",
+		"locked-at lock2 1955-11-12T22:04:00Z",
+		"ownername lock2 marty",
+		"owner lock2 theirs",
+
+		"lock lock3",
+		"path lock3 /large/file/3",
+		"locked-at lock3 2023-10-03T13:56:20Z",
+		"ownername lock3 janedoe",
+		"owner lock3 theirs",
+	}, data)
+
+	writeCommandArgs(t, pl, "list-lock", []string{"id=lock1"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"lock lock1",
+		"path lock1 /large/file/1",
+		"locked-at lock1 2023-10-03T13:56:20Z",
+		"ownername lock1 johndoe",
+		"owner lock1 ours",
+	}, data)
+
+	writeCommandArgs(t, pl, "list-lock", []string{"path=/large/file/2"})
+	status, args, data = readStatusArgsAndTextData(t, pl)
+	require.Equal(t, "status 200", status)
+	require.Empty(t, args)
+	require.Equal(t, []string{
+		"lock lock2",
+		"path lock2 /large/file/2",
+		"locked-at lock2 1955-11-12T22:04:00Z",
+		"ownername lock2 marty",
+		"owner lock2 theirs",
+	}, data)
+
+	quit(t, pl)
+	wg.Wait()
+}
+
+type Owner struct {
+	Name string `json:"name"`
+}
+type LockInfo struct {
+	ID       string `json:"id"`
+	Path     string `json:"path"`
+	LockedAt string `json:"locked_at"`
+	*Owner   `json:"owner"`
+}
+
+func listLocks(cursor string, limit int, refspec string, id string, path string) (locks []*LockInfo, nextCursor string) {
+	allLocks := []struct {
+		Refspec string
+		*LockInfo
+	}{
+		{
+			Refspec: "main",
+			LockInfo: &LockInfo{
+				ID:       "lock1",
+				Path:     "/large/file/1",
+				LockedAt: time.Date(2023, 10, 3, 13, 56, 20, 0, time.UTC).Format(time.RFC3339),
+				Owner: &Owner{
+					Name: "johndoe",
+				},
+			},
+		},
+		{
+			Refspec: "my-branch",
+			LockInfo: &LockInfo{
+				ID:       "lock2",
+				Path:     "/large/file/2",
+				LockedAt: time.Date(1955, 11, 12, 22, 04, 0, 0, time.UTC).Format(time.RFC3339),
+				Owner: &Owner{
+					Name: "marty",
+				},
+			},
+		},
+		{
+			Refspec: "",
+			LockInfo: &LockInfo{
+				ID:       "lock3",
+				Path:     "/large/file/3",
+				LockedAt: time.Date(2023, 10, 3, 13, 56, 20, 0, time.UTC).Format(time.RFC3339),
+				Owner: &Owner{
+					Name: "janedoe",
+				},
+			},
+		},
+	}
+
+	for _, lock := range allLocks {
+		if cursor != "" && cursor != lock.ID {
+			continue
+		}
+		cursor = ""
+		if len(locks) >= limit {
+			nextCursor = lock.ID
+			break
+		}
+
+		if refspec != "" && refspec != lock.Refspec {
+			continue
+		}
+		if id != "" && id != lock.ID {
+			continue
+		}
+		if path != "" && path != lock.Path {
+			continue
+		}
+		locks = append(locks, lock.LockInfo)
+	}
+	return locks, nextCursor
+}
+
+func setup(t *testing.T, keyID string, repo string, op string) (string, *Command, *pktline.Pktline, *io.PipeReader) {
 	var url string
 
 	gitalyAddress, _ := testserver.StartGitalyServer(t, "unix")
@@ -524,7 +1171,7 @@ func setup(t *testing.T, keyId string, repo string, op string) (string, *Command
 
 				var request *lfsauthenticate.Request
 				require.NoError(t, json.Unmarshal(b, &request))
-				if request.KeyId == "rw" {
+				if request.KeyID == "rw" {
 					body := map[string]interface{}{
 						"username":             "john",
 						"lfs_token":            "sometoken",
@@ -597,6 +1244,225 @@ func setup(t *testing.T, keyId string, repo string, op string) (string, *Command
 				w.Write(body)
 			},
 		},
+		{
+			Path: "/evil-url",
+			Handler: func(_ http.ResponseWriter, _ *http.Request) {
+				require.Fail(t, "An attacker accessed an evil URL")
+			},
+		},
+		{
+			Path: fmt.Sprintf("/group/repo/gitlab-lfs/objects/%s", largeFileOid),
+			Handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "Basic 1234567890", r.Header.Get("Authorization"))
+				w.Write([]byte(largeFileContents))
+			},
+		},
+		{
+			Path: fmt.Sprintf("/group/repo/gitlab-lfs/objects/%s/%d", evenLargerFileOid, evenLargerFileLen),
+			Handler: func(_ http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPut, r.Method)
+				require.Equal(t, "Basic 1234567890", r.Header.Get("Authorization"))
+				body, _ := io.ReadAll(r.Body)
+				require.Equal(t, []byte(evenLargerFileContents), body)
+			},
+		},
+		{
+			Path: "/group/repo/info/lfs/locks/verify",
+			Handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPost, r.Method)
+				requestJSON := &struct {
+					Cursor string `json:"cursor"`
+					Limit  int    `json:"limit"`
+					Ref    struct {
+						Name string `json:"name"`
+					} `json:"ref"`
+				}{}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(requestJSON))
+
+				bodyJSON := &struct {
+					Ours       []*LockInfo `json:"ours,omitempty"`
+					Theirs     []*LockInfo `json:"theirs,omitempty"`
+					NextCursor string      `json:"next_cursor,omitempty"`
+				}{}
+				var locks []*LockInfo
+				locks, bodyJSON.NextCursor = listLocks(requestJSON.Cursor, requestJSON.Limit, requestJSON.Ref.Name, r.URL.Query().Get("id"), r.URL.Query().Get("path"))
+				for _, lock := range locks {
+					if lock.ID == "lock1" {
+						bodyJSON.Ours = append(bodyJSON.Ours, lock)
+					} else {
+						bodyJSON.Theirs = append(bodyJSON.Theirs, lock)
+					}
+				}
+
+				require.NoError(t, json.NewEncoder(w).Encode(bodyJSON))
+			},
+		},
+		{
+			Path: "/group/repo/info/lfs/locks",
+			Handler: func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					bodyJSON := &struct {
+						Locks      []*LockInfo `json:"locks,omitempty"`
+						NextCursor string      `json:"next_cursor,omitempty"`
+					}{}
+					limit := 100
+					if r.URL.Query().Has("limit") {
+						l, err := strconv.Atoi(r.URL.Query().Get("limit"))
+						require.NoError(t, err)
+						limit = l
+					}
+					bodyJSON.Locks, bodyJSON.NextCursor = listLocks(r.URL.Query().Get("cursor"), limit, r.URL.Query().Get("refspec"), r.URL.Query().Get("id"), r.URL.Query().Get("path"))
+					require.NoError(t, json.NewEncoder(w).Encode(bodyJSON))
+				case http.MethodPost:
+					var body map[string]interface{}
+					reader := json.NewDecoder(r.Body)
+					reader.Decode(&body)
+
+					var response map[string]interface{}
+					switch body["path"] {
+					case "/large/file/1":
+						response = map[string]interface{}{
+							"lock": map[string]interface{}{
+								"id":        "lock1",
+								"path":      "/large/file/1",
+								"locked_at": time.Date(2023, 10, 3, 13, 56, 20, 0, time.UTC).Format(time.RFC3339),
+								"owner": map[string]interface{}{
+									"name": "johndoe",
+								},
+							},
+							"message": "already created lock",
+						}
+						w.WriteHeader(http.StatusConflict)
+					case "/large/file/2":
+						response = map[string]interface{}{
+							"message": "no permission",
+						}
+						w.WriteHeader(http.StatusForbidden)
+					case "/large/file/4":
+						response = map[string]interface{}{
+							"lock": map[string]interface{}{
+								"id":        "lock4",
+								"path":      "/large/file/4",
+								"locked_at": time.Date(2023, 10, 3, 13, 56, 20, 0, time.UTC).Format(time.RFC3339),
+								"owner": map[string]interface{}{
+									"name": "johndoe",
+								},
+							},
+						}
+						w.WriteHeader(http.StatusCreated)
+					case "/large/file/5":
+						ref := body["ref"].(map[string]interface{})
+						require.Equal(t, "refs/heads/main", ref["name"])
+						response = map[string]interface{}{
+							"lock": map[string]interface{}{
+								"id":        "lock5",
+								"path":      "/large/file/5",
+								"locked_at": time.Date(2023, 10, 3, 13, 56, 20, 0, time.UTC).Format(time.RFC3339),
+								"owner": map[string]interface{}{
+									"name": "johndoe",
+								},
+							},
+						}
+						w.WriteHeader(http.StatusCreated)
+					default:
+						response = map[string]interface{}{
+							"message": "internal error",
+						}
+						w.WriteHeader(http.StatusInternalServerError)
+					}
+					writer := json.NewEncoder(w)
+					writer.Encode(response)
+				}
+			},
+		},
+		{
+			Path: "/group/repo/info/lfs/locks/lock1/unlock",
+			Handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPost, r.Method)
+				var body map[string]interface{}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				require.Equal(t, map[string]interface{}{
+					"ref": map[string]interface{}{
+						"name": "refs/heads/main",
+					},
+					"force": false,
+				}, body)
+
+				lock := map[string]interface{}{
+					"lock": map[string]interface{}{
+						"id":        "lock1",
+						"path":      "/large/file/1",
+						"locked_at": time.Date(2023, 10, 3, 13, 56, 20, 0, time.UTC).Format(time.RFC3339),
+						"owner": map[string]interface{}{
+							"name": "johndoe",
+						},
+					},
+				}
+				writer := json.NewEncoder(w)
+				writer.Encode(lock)
+			},
+		},
+		{
+			Path: "/group/repo/info/lfs/locks/lock2/unlock",
+			Handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPost, r.Method)
+				var body map[string]interface{}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				require.Equal(t, map[string]interface{}{
+					"force": true,
+				}, body)
+
+				lock := map[string]interface{}{
+					"lock": map[string]interface{}{
+						"id":        "lock2",
+						"path":      "/large/file/2",
+						"locked_at": time.Date(1955, 11, 12, 22, 4, 0, 0, time.UTC).Format(time.RFC3339),
+						"owner": map[string]interface{}{
+							"name": "marty",
+						},
+					},
+				}
+				writer := json.NewEncoder(w)
+				writer.Encode(lock)
+			},
+		},
+		{
+			Path: "/group/repo/info/lfs/locks/lock3/unlock",
+			Handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPost, r.Method)
+				var body map[string]interface{}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				require.Equal(t, map[string]interface{}{
+					"force": false,
+				}, body)
+
+				lock := map[string]interface{}{
+					"message": "forbidden",
+				}
+				w.WriteHeader(http.StatusForbidden)
+				writer := json.NewEncoder(w)
+				writer.Encode(lock)
+			},
+		},
+		{
+			Path: "/group/repo/info/lfs/locks/lock4/unlock",
+			Handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPost, r.Method)
+				var body map[string]interface{}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				require.Equal(t, map[string]interface{}{
+					"force": false,
+				}, body)
+
+				lock := map[string]interface{}{
+					"message": "not found",
+				}
+				w.WriteHeader(http.StatusNotFound)
+				writer := json.NewEncoder(w)
+				writer.Encode(lock)
+			},
+		},
 	}
 
 	url = testserver.StartHttpServer(t, requests)
@@ -607,7 +1473,7 @@ func setup(t *testing.T, keyId string, repo string, op string) (string, *Command
 
 	cmd := &Command{
 		Config:     &config.Config{GitlabUrl: url, Secret: "very secret"},
-		Args:       &commandargs.Shell{GitlabKeyId: keyId, SshArgs: []string{"git-lfs-transfer", repo, op}},
+		Args:       &commandargs.Shell{GitlabKeyId: keyID, SshArgs: []string{"git-lfs-transfer", repo, op}},
 		ReadWriter: &readwriter.ReadWriter{ErrOut: errorSink, Out: outputSink, In: inputSource},
 	}
 	pl := pktline.NewPktline(outputSource, inputSink)

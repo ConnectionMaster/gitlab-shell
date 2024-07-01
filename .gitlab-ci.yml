@@ -3,9 +3,7 @@ include:
   - template: Security/SAST.gitlab-ci.yml
   - template: Security/Dependency-Scanning.gitlab-ci.yml
   - template: Security/Secret-Detection.gitlab-ci.yml
-  - project: 'gitlab-org/quality/pipeline-common'
-    file:
-      - '/ci/danger-review.yml'
+  - component: ${CI_SERVER_FQDN}/gitlab-org/components/danger-review/danger-review@1.4.1
 
 stages:
   - prepare
@@ -16,15 +14,10 @@ variables:
   TRANSFER_METER_FREQUENCY: "1s"
   DOCKER_VERSION: "20.10.15"
   BUNDLE_FROZEN: "true"
-  # Due to https://go.dev/doc/toolchain, we need to keep our base image at Go 1.20
-  # until GitLab 16.11 is out which will mean we can drop support for Go 1.20
-  # and make 1.21 our minimum. Using Go 1.21 here now results in the go.mod
-  # being updated to include the 'toolchain go<version>' directive, which
-  # causes CI failures.
-  GO_VERSION: "golang-1.20"
+  GO_VERSION: "golang-1.22"
   GOPATH: $CI_PROJECT_DIR/.GOPATH
   DEBIAN_VERSION: "bookworm"
-  RUBY_VERSION: "ruby-3.2"
+  RUBY_VERSION: "3.2.4"
   BUNDLE_PATH: vendor/ruby
   POLICY: pull
   CI_DEBUG_SERVICES: 'true'
@@ -42,7 +35,7 @@ workflow:
     - if: '$CI_COMMIT_TAG'
 
 default:
-  image: registry.gitlab.com/gitlab-org/gitlab-build-images/debian-${DEBIAN_VERSION}-${RUBY_VERSION}-${GO_VERSION}-${RUST_VERSION}:${IMAGE_TAG}
+  image: registry.gitlab.com/gitlab-org/gitlab-build-images/debian-${DEBIAN_VERSION}-ruby-${RUBY_VERSION}-${GO_VERSION}-${RUST_VERSION}:${IMAGE_TAG}
   tags:
     - gitlab-org
 
@@ -66,7 +59,7 @@ default:
 
 .cached-ruby: &cached_ruby
   - key:
-      prefix: $RUBY_VERSION-cache
+      prefix: "ruby-${RUBY_VERSION}-cache"
       files:
         - Gemfile.lock
     policy: $POLICY
@@ -91,7 +84,7 @@ default:
 .go-matrix-job:
   parallel:
     matrix:
-      - GO_VERSION: ["golang-1.20", "golang-1.21", "golang-1.22"]
+      - GO_VERSION: ["golang-1.21", "golang-1.22"]
 
 ################################################################################
 # Prepare jobs
@@ -163,7 +156,7 @@ tests_without_cgo:
     - make verify test_fancy
 
 tests:fips:
-  image: registry.gitlab.com/gitlab-org/gitlab-build-images/ubi-${UBI_VERSION}-${RUBY_VERSION}-${GO_VERSION}-${RUST_VERSION}:${IMAGE_TAG}
+  image: registry.gitlab.com/gitlab-org/gitlab-build-images/ubi-${UBI_VERSION}-ruby-${RUBY_VERSION}-${GO_VERSION}-${RUST_VERSION}:${IMAGE_TAG}
   extends:
     - .cached-job
     - .test-job

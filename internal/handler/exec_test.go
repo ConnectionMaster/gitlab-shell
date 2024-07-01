@@ -44,7 +44,7 @@ func TestRunGitalyCommand(t *testing.T) {
 
 	expectedErr := errors.New("error")
 	err = cmd.RunGitalyCommand(context.Background(), makeHandler(t, expectedErr))
-	require.Equal(t, err, expectedErr)
+	require.Equal(t, expectedErr, err)
 }
 
 func TestCachingOfGitalyConnections(t *testing.T) {
@@ -173,9 +173,9 @@ func TestPrepareContext(t *testing.T) {
 				&config.Config{},
 				string(commandargs.UploadPack),
 				&accessverifier.Response{
-					KeyId:    1,
+					KeyID:    1,
 					KeyType:  "key",
-					UserId:   "6",
+					UserID:   "6",
 					Username: "jane.doe",
 					Gitaly: accessverifier.Gitaly{
 						Address: "tcp://localhost:9999",
@@ -220,7 +220,6 @@ func TestPrepareContext(t *testing.T) {
 				require.Len(t, values, 1)
 				require.Equal(t, v, values[0])
 			}
-
 		})
 	}
 }
