@@ -40,7 +40,7 @@ func NewClient(config *config.Config) (*Client, error) {
 	return &Client{
 		config:   config,
 		client:   client,
-		resolver: topology.NewResolver(config.TopologyClient, config.GitlabURL),
+		resolver: config.NewTopologyResolver(),
 	}, nil
 }
 

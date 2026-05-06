@@ -193,6 +193,13 @@ func (c *Config) HTTPClient() (*client.HTTPClient, error) {
 	return c.httpClient, c.httpClientErr
 }
 
+// NewTopologyResolver creates a topology.Resolver from this config's
+// TopologyClient and GitlabURL. This centralizes Resolver construction
+// so callers cannot accidentally forget the GitlabURL argument.
+func (c *Config) NewTopologyResolver() *topology.Resolver {
+	return topology.NewResolver(c.TopologyClient, c.GitlabURL)
+}
+
 // Close releases resources owned by the Config, such as the Topology Service
 // gRPC client. It is safe to call Close on a zero-value or partially
 // initialized Config. Callers should defer Close() after loading the config.
