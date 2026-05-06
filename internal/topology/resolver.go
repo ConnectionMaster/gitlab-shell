@@ -138,6 +138,44 @@ func (r *Resolver) ClientForRoute(ctx context.Context, httpClient *client.Gitlab
 	return httpClient
 }
 
+// UserArgs holds the user identity fields needed for cell resolution.
+// It mirrors the relevant fields from commandargs.Shell but avoids
+// importing the command layer into the topology package.
+type UserArgs struct {
+	Username      string
+	KeyID         string
+	Krb5Principal string
+}
+
+// ResolveByUserArgs resolves a cell address from the user identity in
+// command arguments. It picks the best available claim type:
+//   - Username → UsernameClaim
+//   - KeyID / Krb5Principal → returns "" (default host fallback, no matching
+//     Topology Service claim type)
+//
+// This is used for user-scoped endpoints (/discover, /two_factor_recovery_codes,
+// /two_factor_manual_otp_check, /two_factor_push_otp_check, /personal_access_token)
+// that have no repository path for route-based classification.
+func (r *Resolver) ResolveByUserArgs(ctx context.Context, args UserArgs) string {
+	if r == nil {
+		return ""
+	}
+	if args.Username != "" {
+		return r.Resolve(ctx, UsernameClaim(args.Username))
+	}
+	return ""
+}
+
+// ClientForUserArgs returns httpClient routed to the cell resolved for the
+// user identity in args, or the original httpClient if the Topology Service
+// is not configured, returns an error, or returns a non-PROXY action.
+func (r *Resolver) ClientForUserArgs(ctx context.Context, httpClient *client.GitlabNetClient, args UserArgs) *client.GitlabNetClient {
+	if host := r.ResolveByUserArgs(ctx, args); host != "" {
+		return httpClient.WithHost(host)
+	}
+	return httpClient
+}
+
 // ExtractTopLevelNamespace returns the first path segment from a
 // repository path (the top-level namespace in GitLab).
 // Examples:
