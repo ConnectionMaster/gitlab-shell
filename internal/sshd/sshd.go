@@ -131,7 +131,7 @@ func (s *Server) listen(ctx context.Context) error {
 
 		sshListener = &proxyproto.Listener{
 			Listener:          sshListener,
-			Policy:            policy,
+			ConnPolicy:        policy,
 			ReadHeaderTimeout: time.Duration(s.Config.Server.ProxyHeaderTimeout),
 		}
 
@@ -260,9 +260,9 @@ func (s *Server) handleConn(ctx context.Context, nconn net.Conn) {
 	)
 }
 
-func (s *Server) proxyPolicy() (proxyproto.PolicyFunc, error) {
+func (s *Server) proxyPolicy() (proxyproto.ConnPolicyFunc, error) {
 	if len(s.Config.Server.ProxyAllowed) > 0 {
-		return proxyproto.StrictWhiteListPolicy(s.Config.Server.ProxyAllowed)
+		return proxyproto.ConnStrictWhiteListPolicy(s.Config.Server.ProxyAllowed)
 	}
 
 	// Set the Policy value based on config
@@ -293,8 +293,8 @@ func extractLogDataFromContext(ctx context.Context) command.LogData {
 	return logData
 }
 
-func staticProxyPolicy(policy proxyproto.Policy) proxyproto.PolicyFunc {
-	return func(_ net.Addr) (proxyproto.Policy, error) {
+func staticProxyPolicy(policy proxyproto.Policy) proxyproto.ConnPolicyFunc {
+	return func(_ proxyproto.ConnPolicyOptions) (proxyproto.Policy, error) {
 		return policy, nil
 	}
 }
