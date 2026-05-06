@@ -1,3 +1,24 @@
+v14.50.0
+
+- Update github.com/pires/go-proxyproto from v0.8.0 to v0.12.0 !1454
+- Route SSH auth requests via Topology Service !1451
+- Bump RUBY_VERSION to 3.3.11 !1452
+- Add retry with exponential backoff for classify calls !1443
+- Migrate to labkit v2/log logger-in-context API !1433
+- Route /allowed requests via Topology Service !1435
+- Fix `LogExecution: failed to parse user_id` warnings !1448
+- Add tag management guidelines to README !1449
+- Migrate topology client from labkit/log to labkit/v2/log !1438
+- Add scheme-aware Topology Service resolver !1445
+- Bootstrap labkit v2 feature flag client !1404
+- Bump Go version from 1.24.5 to 1.25.9 !1439
+- Fix lint warnings surfaced by golangci-lint v2 !1428
+- Support claim-based classification in Topology Service client !1400
+- Fix flaky sshd tests by using dynamic port allocation !1422
+- Update dependency golangci-lint to v2.11.4 !1427
+- Add logging field validator CI job !1402
+- Update module google.golang.org/grpc to v1.80.0 !1424
+
 v14.49.0
 
 - Pass key_id to git_audit_event endpoint for deploy key auth !1411
