@@ -374,6 +374,31 @@ func TestResolveByUserArgs(t *testing.T) {
 		})
 	}
 
+	t.Run("non-nil resolver with no username does not call Topology Service", func(t *testing.T) {
+		mock := &topologytest.MockClassifyServer{
+			Response: &pb.ClassifyResponse{
+				Action: pb.ClassifyAction_PROXY,
+				Proxy:  &pb.ProxyInfo{Address: "cell-2:8080"},
+			},
+		}
+		addr, stop := topologytest.StartMockServer(t, mock)
+		defer stop()
+
+		client := NewClient(&Config{
+			Enabled: true,
+			Address: addr,
+			Timeout: 5 * time.Second,
+		})
+		defer client.Close()
+
+		resolver := NewResolver(client, "http://localhost")
+		result := resolver.ResolveByUserArgs(context.Background(), UserArgs{KeyID: "123"})
+		require.Empty(t, result)
+
+		// Verify the Topology Service was never contacted
+		require.Equal(t, 0, mock.CallCount)
+	})
+
 	t.Run("nil resolver returns empty string", func(t *testing.T) {
 		var resolver *Resolver
 		result := resolver.ResolveByUserArgs(context.Background(), UserArgs{Username: "jane-doe"})
