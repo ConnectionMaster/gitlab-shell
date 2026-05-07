@@ -330,3 +330,100 @@ func TestResolveBySSHKey(t *testing.T) {
 		require.Equal(t, "https://cell-2:8080", result)
 	})
 }
+
+func TestResolveByUserArgs(t *testing.T) {
+	t.Run("resolves cell address from username", func(t *testing.T) {
+		mock := &topologytest.MockClassifyServer{
+			Response: &pb.ClassifyResponse{
+				Action: pb.ClassifyAction_PROXY,
+				Proxy:  &pb.ProxyInfo{Address: "cell-2:8080"},
+			},
+		}
+		addr, stop := topologytest.StartMockServer(t, mock)
+		defer stop()
+
+		client := NewClient(&Config{
+			Enabled: true,
+			Address: addr,
+			Timeout: 5 * time.Second,
+		})
+		defer client.Close()
+
+		resolver := NewResolver(client, "http://localhost")
+		result := resolver.ResolveByUserArgs(context.Background(), UserArgs{Username: "jane-doe"})
+		require.Equal(t, "http://cell-2:8080", result)
+
+		// Verify the claim sent to the server used the username
+		require.Equal(t, "jane-doe", mock.LastRequest.GetClaim().GetUsername())
+	})
+
+	fallbackTests := []struct {
+		name string
+		args UserArgs
+	}{
+		{"key ID only", UserArgs{KeyID: "123"}},
+		{"krb5principal only", UserArgs{Krb5Principal: "user@REALM"}},
+		{"empty args", UserArgs{}},
+	}
+
+	for _, tc := range fallbackTests {
+		t.Run(tc.name+" returns empty string", func(t *testing.T) {
+			resolver := NewResolver(nil, "http://localhost")
+			result := resolver.ResolveByUserArgs(context.Background(), tc.args)
+			require.Empty(t, result)
+		})
+	}
+
+	t.Run("non-nil resolver with no username does not call Topology Service", func(t *testing.T) {
+		mock := &topologytest.MockClassifyServer{
+			Response: &pb.ClassifyResponse{
+				Action: pb.ClassifyAction_PROXY,
+				Proxy:  &pb.ProxyInfo{Address: "cell-2:8080"},
+			},
+		}
+		addr, stop := topologytest.StartMockServer(t, mock)
+		defer stop()
+
+		client := NewClient(&Config{
+			Enabled: true,
+			Address: addr,
+			Timeout: 5 * time.Second,
+		})
+		defer client.Close()
+
+		resolver := NewResolver(client, "http://localhost")
+		result := resolver.ResolveByUserArgs(context.Background(), UserArgs{KeyID: "123"})
+		require.Empty(t, result)
+
+		// Verify the Topology Service was never contacted
+		require.Equal(t, 0, mock.CallCount)
+	})
+
+	t.Run("nil resolver returns empty string", func(t *testing.T) {
+		var resolver *Resolver
+		result := resolver.ResolveByUserArgs(context.Background(), UserArgs{Username: "jane-doe"})
+		require.Empty(t, result)
+	})
+
+	t.Run("uses https scheme from gitlabURL", func(t *testing.T) {
+		mock := &topologytest.MockClassifyServer{
+			Response: &pb.ClassifyResponse{
+				Action: pb.ClassifyAction_PROXY,
+				Proxy:  &pb.ProxyInfo{Address: "cell-2:8080"},
+			},
+		}
+		addr, stop := topologytest.StartMockServer(t, mock)
+		defer stop()
+
+		client := NewClient(&Config{
+			Enabled: true,
+			Address: addr,
+			Timeout: 5 * time.Second,
+		})
+		defer client.Close()
+
+		resolver := NewResolver(client, "https://gitlab.example.com")
+		result := resolver.ResolveByUserArgs(context.Background(), UserArgs{Username: "jane-doe"})
+		require.Equal(t, "https://cell-2:8080", result)
+	})
+}

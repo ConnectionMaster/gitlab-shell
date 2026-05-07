@@ -24,3 +24,9 @@ func TestProjectIDClaim(t *testing.T) {
 	require.IsType(t, &types_proto.Claim_ProjectId{}, claim.GetClaim())
 	require.Equal(t, int64(42), claim.GetProjectId())
 }
+
+func TestUsernameClaim(t *testing.T) {
+	claim := UsernameClaim("jane-doe")
+	require.IsType(t, &types_proto.Claim_Username{}, claim.GetClaim())
+	require.Equal(t, "jane-doe", claim.GetUsername())
+}

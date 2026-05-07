@@ -21,3 +21,11 @@ func SSHKeyClaim(key string) *types_proto.Claim {
 func ProjectIDClaim(id int64) *types_proto.Claim {
 	return &types_proto.Claim{Claim: &types_proto.Claim_ProjectId{ProjectId: id}}
 }
+
+// UsernameClaim creates a Claim for a GitLab username.
+// Callers should not pass an empty string; the resolver guards against
+// this, but calling UsernameClaim("") directly would send an empty
+// claim to the Topology Service.
+func UsernameClaim(username string) *types_proto.Claim {
+	return &types_proto.Claim{Claim: &types_proto.Claim_Username{Username: username}}
+}
