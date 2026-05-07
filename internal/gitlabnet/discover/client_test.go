@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gitlab.com/gitlab-org/gitlab-shell/v14/client/testserver"
 	"gitlab.com/gitlab-org/gitlab-shell/v14/internal/config"
+	"gitlab.com/gitlab-org/gitlab-shell/v14/internal/topology"
 )
 
 var (
@@ -69,7 +70,7 @@ func TestGetByKeyId(t *testing.T) {
 
 	params := url.Values{}
 	params.Add("key_id", "1")
-	result, err := client.getResponse(context.Background(), params)
+	result, err := client.getResponse(context.Background(), params, topology.UserArgs{KeyID: "1"})
 	require.NoError(t, err)
 	require.Equal(t, &Response{UserID: 2, Username: "alex-doe", Name: "Alex Doe"}, result)
 }
@@ -79,7 +80,7 @@ func TestGetByUsername(t *testing.T) {
 
 	params := url.Values{}
 	params.Add("username", "jane-doe")
-	result, err := client.getResponse(context.Background(), params)
+	result, err := client.getResponse(context.Background(), params, topology.UserArgs{Username: "jane-doe"})
 	require.NoError(t, err)
 	require.Equal(t, &Response{UserID: 1, Username: "jane-doe", Name: "Jane Doe"}, result)
 }
@@ -89,7 +90,7 @@ func TestGetByKrb5Principal(t *testing.T) {
 
 	params := url.Values{}
 	params.Add("krb5principal", "john-doe@TEST.TEST")
-	result, err := client.getResponse(context.Background(), params)
+	result, err := client.getResponse(context.Background(), params, topology.UserArgs{Krb5Principal: "john-doe@TEST.TEST"})
 	require.NoError(t, err)
 	require.Equal(t, &Response{UserID: 3, Username: "john-doe", Name: "John Doe"}, result)
 }
@@ -99,7 +100,7 @@ func TestMissingUser(t *testing.T) {
 
 	params := url.Values{}
 	params.Add("username", "missing")
-	result, err := client.getResponse(context.Background(), params)
+	result, err := client.getResponse(context.Background(), params, topology.UserArgs{Username: "missing"})
 	require.NoError(t, err)
 	require.True(t, result.IsAnonymous())
 }
@@ -133,7 +134,7 @@ func TestErrorResponses(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			params := url.Values{}
 			params.Add("username", tc.fakeUsername)
-			resp, err := client.getResponse(context.Background(), params)
+			resp, err := client.getResponse(context.Background(), params, topology.UserArgs{Username: tc.fakeUsername})
 
 			require.EqualError(t, err, tc.expectedError)
 			require.Nil(t, resp)

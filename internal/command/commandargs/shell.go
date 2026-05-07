@@ -10,6 +10,7 @@ import (
 
 	"github.com/mattn/go-shellwords"
 	"gitlab.com/gitlab-org/gitlab-shell/v14/internal/sshenv"
+	"gitlab.com/gitlab-org/gitlab-shell/v14/internal/topology"
 )
 
 // Define supported command types
@@ -65,6 +66,17 @@ func (s *Shell) Parse() error {
 // GetArguments returns the list of command-line arguments.
 func (s *Shell) GetArguments() []string {
 	return s.Arguments
+}
+
+// UserArgs returns the topology.UserArgs for this shell session's identity fields.
+// This centralizes the mapping from Shell identity fields to the topology
+// resolution parameters, so callers don't need to construct UserArgs inline.
+func (s *Shell) UserArgs() topology.UserArgs {
+	return topology.UserArgs{
+		Username:      s.GitlabUsername,
+		KeyID:         s.GitlabKeyID,
+		Krb5Principal: s.GitlabKrb5Principal,
+	}
 }
 
 func (s *Shell) validate() error {

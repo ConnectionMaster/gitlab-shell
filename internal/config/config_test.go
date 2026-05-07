@@ -184,6 +184,12 @@ func TestConfigClose(t *testing.T) {
 	})
 }
 
+func TestNewTopologyResolver(t *testing.T) {
+	cfg := &Config{GitlabURL: "https://gitlab.example.com"}
+	resolver := cfg.NewTopologyResolver()
+	require.NotNil(t, resolver)
+}
+
 func TestTopologyServiceConfigValidation(t *testing.T) {
 	t.Run("newFromFile rejects invalid topology config", func(t *testing.T) {
 		// Create a temporary directory with an invalid config
